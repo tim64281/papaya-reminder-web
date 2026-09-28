@@ -1,0 +1,11 @@
+{
+  "name": "Papaya 提醒",
+  "short_name": "Papaya",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#fff7f0",
+  "theme_color": "#ff8a3d",
+  "icons": [
+    { "src": "icon.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

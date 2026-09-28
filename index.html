@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Papaya 提醒</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icon.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <section id="login-screen">
+    <h1>Papaya 提醒</h1>
+    <input id="password-input" type="password" placeholder="請輸入密碼" />
+    <button id="login-button">登入</button>
+    <p id="login-error" class="error-text" hidden>密碼錯誤,請再試一次</p>
+  </section>
+
+  <section id="main-screen" hidden>
+    <nav>
+      <button id="nav-contacts">聯絡人</button>
+      <button id="logout-button">登出</button>
+    </nav>
+    <button id="mic-button" aria-label="開始說話">🎙️</button>
+    <p id="conversation-status"></p>
+    <ul id="reminder-list"></ul>
+  </section>
+
+  <section id="contacts-screen" hidden>
+    <button id="back-to-main">← 返回</button>
+    <h2>聯絡人</h2>
+    <ul id="contacts-list"></ul>
+  </section>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
