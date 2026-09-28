@@ -29,6 +29,10 @@ body {
   gap: 16px;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 input, button {
   font-size: 1rem;
   padding: 12px 16px;
