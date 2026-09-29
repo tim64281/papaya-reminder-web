@@ -10,6 +10,17 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const el = (id) => document.getElementById(id);
 
+// Safety net: surface any otherwise-silent error on screen instead of it
+// just vanishing into the console (which the user has no way to see on
+// their phone).
+function showFatalError(err) {
+  const status = el("conversation-status");
+  if (status) status.textContent = `發生未預期的錯誤:${err?.message ?? err}`;
+  console.error(err);
+}
+window.addEventListener("error", (e) => showFatalError(e.error ?? e.message));
+window.addEventListener("unhandledrejection", (e) => showFatalError(e.reason));
+
 // ---------- Auth ----------
 
 el("login-button").addEventListener("click", async () => {
@@ -131,15 +142,23 @@ function stopRecording() {
   activeRecorder = null;
 }
 
+async function authHeaders() {
+  const { data: { session } } = await supabase.auth.getSession();
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${session?.access_token ?? SUPABASE_ANON_KEY}`,
+  };
+}
+
 async function transcribeAudio(blob, mimeType) {
   const audioBase64 = await blobToBase64(blob);
   const res = await fetch(`${SUPABASE_URL}/functions/v1/transcribe`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({ audioBase64, mimeType }),
   });
   const data = await res.json();
-  if (data.error) throw new Error(data.error);
+  if (!res.ok || data.error) throw new Error(data.error ?? data.message ?? String(res.status));
   return data.transcript;
 }
 
@@ -149,12 +168,18 @@ let pendingParsed = null;
 let currentRecordingPromise = null;
 
 el("mic-button").addEventListener("click", async () => {
-  if (phase === "idle") {
-    await beginConversation();
-  } else if (phase === "awaiting-request") {
-    await finishRequestRecording();
-  } else if (phase === "awaiting-confirmation") {
-    await finishConfirmationRecording();
+  try {
+    if (phase === "idle") {
+      await beginConversation();
+    } else if (phase === "awaiting-request") {
+      await finishRequestRecording();
+    } else if (phase === "awaiting-confirmation") {
+      await finishConfirmationRecording();
+    }
+  } catch (err) {
+    el("conversation-status").textContent = `發生錯誤:${err.message}`;
+    console.error(err);
+    resetConversation();
   }
 });
 
@@ -190,7 +215,7 @@ async function finishRequestRecording() {
   const audioBase64 = await blobToBase64(result.blob);
   const parseRes = await fetch(`${SUPABASE_URL}/functions/v1/parse-reminder`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({
       audioBase64,
       mimeType: result.mimeType,
@@ -199,8 +224,8 @@ async function finishRequestRecording() {
     }),
   });
   const parsed = await parseRes.json();
-  if (parsed.error) {
-    el("conversation-status").textContent = `解析失敗:${parsed.error}`;
+  if (!parseRes.ok || parsed.error) {
+    el("conversation-status").textContent = `解析失敗:${parsed.error ?? parsed.message ?? parseRes.status}`;
     resetConversation();
     return;
   }
