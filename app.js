@@ -1,8 +1,8 @@
 // web/app.js
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { createSpeechEndDetector, formatReminderRow, pickConfirmationOutcome } from "./logic.js?v=20260929c";
+import { createSpeechEndDetector, formatReminderRow, pickConfirmationOutcome } from "./logic.js?v=20260929d";
 
-const APP_VERSION = "20260929c";
+const APP_VERSION = "20260929d";
 const SUPABASE_URL = "https://lgercluzqbxlcjbdhkcw.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_YzWeHCfTap6N6LALQhddkA_HQV0QwSx";
 const FIXED_LOGIN_EMAIL = "papaya@papaya-reminder.local";
@@ -182,9 +182,19 @@ function recognizeSpeech(onPartial) {
 }
 
 // Must run synchronously inside the tap handler: iOS only lets audio start from a user gesture.
+let speechUnlocked = false;
+
 function unlockAudio() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (audioCtx.state !== "running") audioCtx.resume();
+  // iOS only lets speechSynthesis start from a tap; a silent utterance here
+  // lets the later spoken confirmations play after async work.
+  if (!speechUnlocked && "speechSynthesis" in window) {
+    const silent = new SpeechSynthesisUtterance(" ");
+    silent.volume = 0;
+    speechSynthesis.speak(silent);
+    speechUnlocked = true;
+  }
 }
 
 function speak(text) {
@@ -363,8 +373,6 @@ async function listen(prompt) {
 async function runConversation() {
   conversationActive = true;
   el("mic-button").classList.add("listening");
-  await speak("嗨,Papaya,有什麼我可以幫忙的?");
-
   let silentTries = 0;
   for (let round = 0; round < 5 && conversationActive; round++) {
     const heard = await listen("聆聽中…說完會自動送出(也可以再按一次麥克風送出)");
