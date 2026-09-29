@@ -1,8 +1,8 @@
 // web/app.js
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { createSpeechEndDetector, formatReminderRow, pickConfirmationOutcome } from "./logic.js?v=20260929b";
+import { createSpeechEndDetector, formatReminderRow, pickConfirmationOutcome } from "./logic.js?v=20260929c";
 
-const APP_VERSION = "20260929b";
+const APP_VERSION = "20260929c";
 const SUPABASE_URL = "https://lgercluzqbxlcjbdhkcw.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_YzWeHCfTap6N6LALQhddkA_HQV0QwSx";
 const FIXED_LOGIN_EMAIL = "papaya@papaya-reminder.local";
@@ -102,15 +102,84 @@ async function callFunction(name, body) {
 
 // ---------- Voice ----------
 //
-// Speech-to-text goes through Gemini (recorded audio → edge function) rather
-// than the browser's SpeechRecognition, so behaviour is the same on iPhone,
-// Android and desktop. End of speech is detected locally from microphone
-// loudness, so the user doesn't have to tap to send.
+// Speech-to-text normally uses the phone's own recognizer (on iPhone this is
+// Siri dictation), which shows words as they are spoken and costs no AI quota.
+// If the recognizer is missing or refuses to run, we fall back for the rest
+// of the session to recording audio and having Gemini transcribe it, with
+// end of speech detected locally from microphone loudness.
 
 let audioCtx = null;
 let currentUtterance = null; // iOS drops onend if the utterance is garbage-collected
 let activeRecording = null;
+let activeRecognition = null;
+let speechRecognitionBroken = false;
 let conversationActive = false;
+
+const RECOGNIZER_FAILURES = new Set([
+  "not-allowed",
+  "service-not-allowed",
+  "network",
+  "audio-capture",
+  "language-not-supported",
+]);
+
+function getRecognizer() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition;
+}
+
+// Resolves with the recognised text ("" if nothing was said) or null if
+// cancelled; rejects if the recognizer itself can't work on this device.
+function recognizeSpeech(onPartial) {
+  return new Promise((resolve, reject) => {
+    const Recognizer = getRecognizer();
+    const rec = new Recognizer();
+    rec.lang = "zh-TW";
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+
+    let latestText = "";
+    let cancelled = false;
+    let failure = null;
+    // Some iPhones never end on their own when nobody speaks.
+    const noSpeechTimer = setTimeout(() => latestText || rec.stop(), 8000);
+    const maxTimer = setTimeout(() => rec.stop(), 20000);
+
+    rec.onresult = (event) => {
+      let text = "";
+      for (let i = 0; i < event.results.length; i++) text += event.results[i][0].transcript;
+      latestText = text;
+      onPartial(text);
+    };
+    rec.onerror = (event) => {
+      if (RECOGNIZER_FAILURES.has(event.error)) failure = event.error;
+    };
+    rec.onend = () => {
+      clearTimeout(noSpeechTimer);
+      clearTimeout(maxTimer);
+      activeRecognition = null;
+      if (cancelled) resolve(null);
+      else if (failure) reject(new Error(failure));
+      else resolve(latestText.trim());
+    };
+
+    activeRecognition = {
+      sendNow: () => rec.stop(),
+      cancel: () => {
+        cancelled = true;
+        rec.abort();
+      },
+    };
+    try {
+      rec.start();
+    } catch (err) {
+      clearTimeout(noSpeechTimer);
+      clearTimeout(maxTimer);
+      activeRecognition = null;
+      reject(err);
+    }
+  });
+}
 
 // Must run synchronously inside the tap handler: iOS only lets audio start from a user gesture.
 function unlockAudio() {
@@ -239,8 +308,9 @@ async function recordUtterance() {
 
 el("mic-button").addEventListener("click", () => {
   unlockAudio();
-  if (activeRecording) {
-    activeRecording.sendNow();
+  const listening = activeRecognition ?? activeRecording;
+  if (listening) {
+    listening.sendNow();
     return;
   }
   if (conversationActive) {
@@ -254,14 +324,35 @@ el("mic-button").addEventListener("click", () => {
 
 function endConversation(message) {
   conversationActive = false;
+  activeRecognition?.cancel();
   activeRecording?.cancel();
   if ("speechSynthesis" in window) speechSynthesis.cancel();
   el("mic-button").classList.remove("listening");
   if (message !== undefined) setStatus(message);
 }
 
+// Resolves with { silent: true }, { text } from the phone's recognizer,
+// { audioBase64, mimeType } from the recording fallback, or null if cancelled.
 async function listen(prompt) {
+  // Let the speaker fall quiet first so the AI's own voice isn't picked up.
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  if (!conversationActive) return null;
   setStatus(prompt);
+
+  if (getRecognizer() && !speechRecognitionBroken) {
+    try {
+      const text = await recognizeSpeech((partial) => setStatus(`你說:「${partial}」`));
+      if (!conversationActive || text === null) return null;
+      if (!text) return { silent: true };
+      setStatus(`你說:「${text}」,思考中…`);
+      return { silent: false, text };
+    } catch {
+      speechRecognitionBroken = true;
+      if (!conversationActive) return null;
+      setStatus(prompt);
+    }
+  }
+
   const recording = await recordUtterance();
   if (!conversationActive || recording.outcome === "cancelled") return null;
   if (recording.outcome === "no-speech") return { silent: true };
@@ -284,11 +375,10 @@ async function runConversation() {
       continue;
     }
 
-    const parsed = await callFunction("parse-reminder", {
-      audioBase64: heard.audioBase64,
-      mimeType: heard.mimeType,
-      contacts: await namedContacts(),
-    });
+    const speech = heard.text !== undefined
+      ? { text: heard.text }
+      : { audioBase64: heard.audioBase64, mimeType: heard.mimeType };
+    const parsed = await callFunction("parse-reminder", { ...speech, contacts: await namedContacts() });
     if (!conversationActive) return;
     if (parsed.transcript) setStatus(`你說:「${parsed.transcript}」`);
 
@@ -327,10 +417,8 @@ async function askForConfirmation() {
     const heard = await listen("請說「對」或「不對」");
     if (!heard) return null;
     if (!heard.silent) {
-      const { transcript } = await callFunction("transcribe", {
-        audioBase64: heard.audioBase64,
-        mimeType: heard.mimeType,
-      });
+      const transcript = heard.text ??
+        (await callFunction("transcribe", { audioBase64: heard.audioBase64, mimeType: heard.mimeType })).transcript;
       const outcome = pickConfirmationOutcome(transcript);
       if (outcome !== "unclear") return outcome;
     }
