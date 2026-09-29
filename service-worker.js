@@ -1,35 +1,18 @@
 // web/service-worker.js
 //
-// Network-first for the app shell so a redeploy reaches users immediately
-// (falls back to cache only when offline). Bump CACHE_NAME on any change
-// so the activate handler cleans out the old cache instead of leaving a
-// stale copy that never gets used.
-const CACHE_NAME = "papaya-shell-v2";
-const SHELL_FILES = ["./index.html", "./styles.css", "./app.js", "./logic.js", "./manifest.json", "./icon.png"];
-
-self.addEventListener("install", (event) => {
-  self.skipWaiting();
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_FILES)),
-  );
-});
+// Kill switch. An earlier release registered a cache-first service worker
+// that kept serving stale app code on devices that had visited once. The
+// app no longer uses a service worker; this file stays at the same URL so
+// the browser's automatic update check replaces the old worker with this
+// one, which deletes all caches, unregisters itself and reloads open pages.
+self.addEventListener("install", () => self.skipWaiting());
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    caches.keys().then((names) =>
-      Promise.all(names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name)))
-    ).then(() => self.clients.claim()),
-  );
-});
-
-self.addEventListener("fetch", (event) => {
-  event.respondWith(
-    fetch(event.request)
-      .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-        return response;
-      })
-      .catch(() => caches.match(event.request)),
-  );
+  event.waitUntil((async () => {
+    const names = await caches.keys();
+    await Promise.all(names.map((name) => caches.delete(name)));
+    await self.registration.unregister();
+    const clients = await self.clients.matchAll({ type: "window" });
+    clients.forEach((client) => client.navigate(client.url));
+  })());
 });

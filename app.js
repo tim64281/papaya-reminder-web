@@ -1,7 +1,8 @@
 // web/app.js
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { pickConfirmationOutcome, formatReminderRow } from "./logic.js";
+import { createSpeechEndDetector, formatReminderRow, pickConfirmationOutcome } from "./logic.js?v=20260929b";
 
+const APP_VERSION = "20260929b";
 const SUPABASE_URL = "https://lgercluzqbxlcjbdhkcw.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_YzWeHCfTap6N6LALQhddkA_HQV0QwSx";
 const FIXED_LOGIN_EMAIL = "papaya@papaya-reminder.local";
@@ -10,16 +11,14 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const el = (id) => document.getElementById(id);
 
-// Safety net: surface any otherwise-silent error on screen instead of it
-// just vanishing into the console (which the user has no way to see on
-// their phone).
-function showFatalError(err) {
-  const status = el("conversation-status");
-  if (status) status.textContent = `發生未預期的錯誤:${err?.message ?? err}`;
-  console.error(err);
+function setStatus(text) {
+  el("conversation-status").textContent = text;
 }
-window.addEventListener("error", (e) => showFatalError(e.error ?? e.message));
-window.addEventListener("unhandledrejection", (e) => showFatalError(e.reason));
+
+// Anything that slips past the handlers below still shows up on screen,
+// since the user has no console on their phone.
+window.addEventListener("error", (e) => setStatus(`發生未預期的錯誤:${e.error?.message ?? e.message}`));
+window.addEventListener("unhandledrejection", (e) => setStatus(`發生未預期的錯誤:${e.reason?.message ?? e.reason}`));
 
 // ---------- Auth ----------
 
@@ -38,6 +37,7 @@ el("login-button").addEventListener("click", async () => {
 });
 
 el("logout-button").addEventListener("click", async () => {
+  endConversation();
   await supabase.auth.signOut();
   el("main-screen").hidden = true;
   el("login-screen").hidden = false;
@@ -66,33 +66,79 @@ async function refreshReminderList() {
   for (const reminder of data) {
     const row = formatReminderRow(reminder);
     const li = document.createElement("li");
-    li.innerHTML = `${row.text} <span class="${row.statusClass}">(${row.statusLabel})</span>`;
+    const text = document.createElement("span");
+    text.textContent = `${row.text} `;
+    const status = document.createElement("span");
+    status.className = row.statusClass;
+    status.textContent = `(${row.statusLabel})`;
+    li.append(text, status);
     list.appendChild(li);
   }
 }
 
-// ---------- Voice conversation ----------
+// ---------- Talking to the edge functions ----------
+
+async function callFunction(name, body) {
+  const { data: { session } } = await supabase.auth.getSession();
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session?.access_token ?? SUPABASE_ANON_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error(`伺服器回應格式錯誤 (${res.status})`);
+  }
+  if (!res.ok || data.error) {
+    throw new Error(data.error ?? data.message ?? `伺服器錯誤 (${res.status})`);
+  }
+  return data;
+}
+
+// ---------- Voice ----------
 //
-// iOS Safari has never implemented the Web Speech API's SpeechRecognition
-// (speech-to-text), only speechSynthesis (text-to-speech). Since this app
-// must work on iPhone, speech-to-text is done by recording audio with
-// MediaRecorder (supported on iOS Safari 14.3+) and sending the clip to
-// Gemini for understanding, instead of relying on browser speech
-// recognition.
+// Speech-to-text goes through Gemini (recorded audio → edge function) rather
+// than the browser's SpeechRecognition, so behaviour is the same on iPhone,
+// Android and desktop. End of speech is detected locally from microphone
+// loudness, so the user doesn't have to tap to send.
+
+let audioCtx = null;
+let currentUtterance = null; // iOS drops onend if the utterance is garbage-collected
+let activeRecording = null;
+let conversationActive = false;
+
+// Must run synchronously inside the tap handler: iOS only lets audio start from a user gesture.
+function unlockAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state !== "running") audioCtx.resume();
+}
 
 function speak(text) {
   return new Promise((resolve) => {
+    if (!text || !("speechSynthesis" in window)) return resolve();
     const utter = new SpeechSynthesisUtterance(text);
     utter.lang = "zh-TW";
-    utter.onend = resolve;
+    // Fallback in case the browser never fires onend (seen on iOS and in some desktop browsers).
+    const timer = setTimeout(done, 2000 + text.length * 400);
+    function done() {
+      clearTimeout(timer);
+      resolve();
+    }
+    utter.onend = done;
+    utter.onerror = done;
+    currentUtterance = utter;
     speechSynthesis.speak(utter);
   });
 }
 
-function pickSupportedMimeType() {
-  const candidates = ["audio/mp4", "audio/webm", "audio/ogg"];
-  for (const type of candidates) {
-    if (window.MediaRecorder && MediaRecorder.isTypeSupported(type)) return type;
+function pickRecorderMimeType() {
+  for (const type of ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg"]) {
+    if (MediaRecorder.isTypeSupported(type)) return type;
   }
   return "";
 }
@@ -100,194 +146,224 @@ function pickSupportedMimeType() {
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result.split(",")[1]);
-    reader.onerror = reject;
+    reader.onloadend = () => resolve(String(reader.result).split(",")[1] ?? "");
+    reader.onerror = () => reject(new Error("讀取錄音失敗"));
     reader.readAsDataURL(blob);
   });
 }
 
-let activeRecorder = null;
-
-// Starts recording immediately and returns a promise that resolves with
-// { blob, mimeType } once stopRecording() is called.
-async function startRecording() {
-  if (!navigator.mediaDevices || !window.MediaRecorder) {
-    throw new Error("這個瀏覽器不支援錄音功能");
+// Records one utterance. Resolves with { outcome, blob, mimeType } where
+// outcome is "speech" (user talked, or tapped to send), "no-speech" or "cancelled".
+async function recordUtterance() {
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    throw new Error("這個瀏覽器不支援錄音,請改用手機的 Safari 或 Chrome");
   }
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const mimeType = pickSupportedMimeType();
-  const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    throw new Error(`無法使用麥克風,請允許麥克風權限(${err.message})`);
+  }
+
+  unlockAudio();
+  const source = audioCtx.createMediaStreamSource(stream);
+  const analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 1024;
+  source.connect(analyser);
+  const floatSamples = new Float32Array(analyser.fftSize);
+  const byteSamples = new Uint8Array(analyser.fftSize);
+  const readLevel = () => {
+    let sum = 0;
+    if (analyser.getFloatTimeDomainData) {
+      analyser.getFloatTimeDomainData(floatSamples);
+      for (const v of floatSamples) sum += v * v;
+    } else {
+      analyser.getByteTimeDomainData(byteSamples);
+      for (const s of byteSamples) sum += ((s - 128) / 128) ** 2;
+    }
+    return Math.sqrt(sum / analyser.fftSize);
+  };
+  const detect = createSpeechEndDetector();
+  let peakLevel = 0;
+
+  const preferred = pickRecorderMimeType();
+  const recorder = preferred ? new MediaRecorder(stream, { mimeType: preferred }) : new MediaRecorder(stream);
   const chunks = [];
   recorder.ondataavailable = (e) => {
     if (e.data.size > 0) chunks.push(e.data);
   };
 
-  const stopped = new Promise((resolve) => {
-    recorder.onstop = () => {
-      stream.getTracks().forEach((track) => track.stop());
-      const blob = new Blob(chunks, { type: recorder.mimeType });
-      resolve({ blob, mimeType: recorder.mimeType });
-    };
-  });
+  return new Promise((resolve, reject) => {
+    let outcome = null;
+    const timer = setInterval(() => {
+      const level = readLevel();
+      peakLevel = Math.max(peakLevel, level);
+      const state = detect(level, performance.now());
+      if (state === "done") finish("speech");
+      // If the loudness meter never saw any signal, it isn't working on this
+      // device; send the audio anyway and let the AI decide instead of
+      // wrongly claiming the user said nothing.
+      else if (state === "no-speech") finish(peakLevel > 0.0001 ? "no-speech" : "speech");
+    }, 100);
 
-  recorder.start();
-  activeRecorder = recorder;
-  return stopped;
-}
-
-function stopRecording() {
-  if (activeRecorder && activeRecorder.state !== "inactive") {
-    activeRecorder.stop();
-  }
-  activeRecorder = null;
-}
-
-async function authHeaders() {
-  const { data: { session } } = await supabase.auth.getSession();
-  return {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${session?.access_token ?? SUPABASE_ANON_KEY}`,
-  };
-}
-
-async function transcribeAudio(blob, mimeType) {
-  const audioBase64 = await blobToBase64(blob);
-  const res = await fetch(`${SUPABASE_URL}/functions/v1/transcribe`, {
-    method: "POST",
-    headers: await authHeaders(),
-    body: JSON.stringify({ audioBase64, mimeType }),
-  });
-  const data = await res.json();
-  if (!res.ok || data.error) throw new Error(data.error ?? data.message ?? String(res.status));
-  return data.transcript;
-}
-
-// phase: 'idle' | 'awaiting-request' | 'awaiting-confirmation'
-let phase = "idle";
-let pendingParsed = null;
-let currentRecordingPromise = null;
-
-el("mic-button").addEventListener("click", async () => {
-  try {
-    if (phase === "idle") {
-      await beginConversation();
-    } else if (phase === "awaiting-request") {
-      await finishRequestRecording();
-    } else if (phase === "awaiting-confirmation") {
-      await finishConfirmationRecording();
+    function finish(result) {
+      if (outcome) return;
+      outcome = result;
+      clearInterval(timer);
+      if (recorder.state !== "inactive") recorder.stop();
     }
-  } catch (err) {
-    el("conversation-status").textContent = `發生錯誤:${err.message}`;
-    console.error(err);
-    resetConversation();
+
+    recorder.onstop = () => {
+      source.disconnect();
+      stream.getTracks().forEach((track) => track.stop());
+      activeRecording = null;
+      const mimeType = (recorder.mimeType || preferred || "audio/mp4").split(";")[0];
+      resolve({ outcome, blob: new Blob(chunks, { type: mimeType }), mimeType });
+    };
+    recorder.onerror = (e) => {
+      clearInterval(timer);
+      stream.getTracks().forEach((track) => track.stop());
+      activeRecording = null;
+      reject(new Error(`錄音失敗:${e.error?.message ?? "未知錯誤"}`));
+    };
+
+    activeRecording = {
+      sendNow: () => finish("speech"),
+      cancel: () => finish("cancelled"),
+    };
+    recorder.start();
+  });
+}
+
+// ---------- Conversation ----------
+
+el("mic-button").addEventListener("click", () => {
+  unlockAudio();
+  if (activeRecording) {
+    activeRecording.sendNow();
+    return;
   }
+  if (conversationActive) {
+    endConversation("已結束對話");
+    return;
+  }
+  runConversation().catch((err) => {
+    endConversation(`發生錯誤:${err.message}`);
+  });
 });
 
-async function beginConversation() {
+function endConversation(message) {
+  conversationActive = false;
+  activeRecording?.cancel();
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+  el("mic-button").classList.remove("listening");
+  if (message !== undefined) setStatus(message);
+}
+
+async function listen(prompt) {
+  setStatus(prompt);
+  const recording = await recordUtterance();
+  if (!conversationActive || recording.outcome === "cancelled") return null;
+  if (recording.outcome === "no-speech") return { silent: true };
+  setStatus("思考中…");
+  return { silent: false, audioBase64: await blobToBase64(recording.blob), mimeType: recording.mimeType };
+}
+
+async function runConversation() {
+  conversationActive = true;
   el("mic-button").classList.add("listening");
   await speak("嗨,Papaya,有什麼我可以幫忙的?");
-  await beginRequestRecording();
-}
 
-async function beginRequestRecording() {
-  el("conversation-status").textContent = "錄音中,說完後再按一次麥克風";
-  try {
-    currentRecordingPromise = await startRecording();
-    phase = "awaiting-request";
-  } catch (err) {
-    el("conversation-status").textContent = `無法錄音:${err.message}`;
-    resetConversation();
-  }
-}
+  let silentTries = 0;
+  for (let round = 0; round < 5 && conversationActive; round++) {
+    const heard = await listen("聆聽中…說完會自動送出(也可以再按一次麥克風送出)");
+    if (!heard) return;
+    if (heard.silent) {
+      if (++silentTries >= 2) break;
+      await speak("我沒聽到聲音,可以再說一次嗎?");
+      continue;
+    }
 
-async function finishRequestRecording() {
-  el("conversation-status").textContent = "處理中...";
-  stopRecording();
-  const result = await currentRecordingPromise;
-  phase = "idle";
+    const parsed = await callFunction("parse-reminder", {
+      audioBase64: heard.audioBase64,
+      mimeType: heard.mimeType,
+      contacts: await namedContacts(),
+    });
+    if (!conversationActive) return;
+    if (parsed.transcript) setStatus(`你說:「${parsed.transcript}」`);
 
-  const { data: contacts } = await supabase.from("contacts").select("id, display_name").not(
-    "display_name",
-    "is",
-    null,
-  );
+    await speak(parsed.confirmationText);
+    if (!conversationActive) return;
+    if (parsed.unknownContactName) {
+      endConversation(parsed.confirmationText);
+      return;
+    }
+    if (parsed.needsClarification) continue;
 
-  const audioBase64 = await blobToBase64(result.blob);
-  const parseRes = await fetch(`${SUPABASE_URL}/functions/v1/parse-reminder`, {
-    method: "POST",
-    headers: await authHeaders(),
-    body: JSON.stringify({
-      audioBase64,
-      mimeType: result.mimeType,
-      contacts: contacts ?? [],
-      nowIso: new Date().toISOString(),
-    }),
-  });
-  const parsed = await parseRes.json();
-  if (!parseRes.ok || parsed.error) {
-    el("conversation-status").textContent = `解析失敗:${parsed.error ?? parsed.message ?? parseRes.status}`;
-    resetConversation();
+    const decision = await askForConfirmation();
+    if (!conversationActive) return;
+    if (decision === "confirm") {
+      await saveReminder(parsed);
+      await refreshReminderList();
+      await speak("好的,已經幫您建立提醒了。");
+      endConversation("已建立提醒 ✅");
+      return;
+    }
+    if (decision === "reject") {
+      await speak("好的,請再說一次。");
+      continue;
+    }
+    await speak("沒關係,需要時再按麥克風叫我。");
+    endConversation("");
     return;
   }
-
-  await speak(parsed.confirmationText);
-
-  if (parsed.needsClarification) {
-    await beginRequestRecording();
-    return;
-  }
-
-  pendingParsed = parsed;
-  el("conversation-status").textContent = "請說「對」確認,或說「不對」重講(再按一次麥克風結束錄音)";
-  currentRecordingPromise = startRecording();
-  phase = "awaiting-confirmation";
-}
-
-async function finishConfirmationRecording() {
-  el("conversation-status").textContent = "處理中...";
-  stopRecording();
-  const result = await currentRecordingPromise;
-  phase = "idle";
-  el("mic-button").classList.remove("listening");
-
-  let reply;
-  try {
-    reply = await transcribeAudio(result.blob, result.mimeType);
-  } catch (err) {
-    el("conversation-status").textContent = `沒聽清楚:${err.message}`;
-    resetConversation();
-    return;
-  }
-
-  const outcome = pickConfirmationOutcome(reply);
-  if (outcome === "confirm") {
-    await saveReminder(pendingParsed);
-    await speak("好的,已經幫您建立提醒了。");
-    await refreshReminderList();
-    resetConversation();
-  } else if (outcome === "reject") {
-    await speak("好的,請再說一次。");
-    el("mic-button").classList.add("listening");
-    await beginRequestRecording();
-  } else {
-    el("conversation-status").textContent = `聽不太懂「${reply}」,請說「對」或「不對」`;
-    resetConversation();
+  if (conversationActive) {
+    endConversation(silentTries >= 2 ? "沒有聽到聲音,需要時再按麥克風" : "需要時再按麥克風叫我");
   }
 }
 
-function resetConversation() {
-  phase = "idle";
-  pendingParsed = null;
-  currentRecordingPromise = null;
-  el("mic-button").classList.remove("listening");
+async function askForConfirmation() {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const heard = await listen("請說「對」或「不對」");
+    if (!heard) return null;
+    if (!heard.silent) {
+      const { transcript } = await callFunction("transcribe", {
+        audioBase64: heard.audioBase64,
+        mimeType: heard.mimeType,
+      });
+      const outcome = pickConfirmationOutcome(transcript);
+      if (outcome !== "unclear") return outcome;
+    }
+    if (!conversationActive) return null;
+    if (attempt === 0) await speak("請說對,或是不對。");
+  }
+  return null;
+}
+
+async function namedContacts() {
+  const { data, error } = await supabase
+    .from("contacts")
+    .select("id, display_name")
+    .eq("is_self", false)
+    .not("display_name", "is", null);
+  if (error) throw new Error(`讀取聯絡人失敗:${error.message}`);
+  return data;
 }
 
 async function saveReminder(parsed) {
-  await supabase.from("reminders").insert({
-    target_contact_id: parsed.targetContactId,
+  let targetId = parsed.targetContactId;
+  if (!targetId) {
+    const { data: self, error } = await supabase.from("contacts").select("id").eq("is_self", true).maybeSingle();
+    if (error) throw new Error(`讀取聯絡人失敗:${error.message}`);
+    if (!self) throw new Error("找不到「我自己」的 LINE 帳號,請先掃 QR code 加官方帳號好友");
+    targetId = self.id;
+  }
+  const { error } = await supabase.from("reminders").insert({
+    target_contact_id: targetId,
     message: parsed.message,
     remind_at: parsed.remindAtIso,
   });
+  if (error) throw new Error(`儲存提醒失敗:${error.message}`);
 }
 
 // ---------- Contacts screen ----------
@@ -333,9 +409,11 @@ async function refreshContactsList() {
 
 // ---------- Boot ----------
 
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("./service-worker.js");
-}
+el("app-version").textContent = `版本 ${APP_VERSION}`;
+
+// An earlier release installed a cache-first service worker that kept serving
+// stale code; remove any leftover registration so updates always show up.
+navigator.serviceWorker?.getRegistrations().then((regs) => regs.forEach((r) => r.unregister()));
 
 const { data: { session } } = await supabase.auth.getSession();
 if (session) {

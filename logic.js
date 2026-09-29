@@ -1,21 +1,14 @@
-const YES_WORDS = ["對", "对", "是", "好", "沒錯", "没错", "嗯對", "OK", "ok"];
-const NO_WORDS = ["不對", "不对", "不是", "錯", "错", "重講", "重讲"];
-
-// Separate negations (with "不") and check them first to avoid substring conflicts
-const NEGATIONS = ["不對", "不对", "不是", "重講", "重讲"];
-const NO_WORDS_SIMPLE = ["錯", "错"];
-
-// Sort by length descending so longer phrases match before single characters
-const YES_WORDS_SORTED = [...YES_WORDS].sort((a, b) => b.length - a.length);
+// Negations are checked first: "不好" contains "好" and "不是" contains "是".
+const NEGATIONS = ["不對", "不对", "不是", "不好", "不要", "重講", "重讲", "錯", "错"];
+// "沒錯" contains "錯", so the yes check for it must come before the negation check.
+const YES_OVERRIDES = ["沒錯", "没错"];
+const YES_WORDS = ["對", "对", "是", "好", "OK", "ok", "可以"];
 
 export function pickConfirmationOutcome(transcript) {
   const t = transcript.trim();
-  // Check negations first (phrases with "不" prefix)
+  if (YES_OVERRIDES.some((w) => t.includes(w))) return "confirm";
   if (NEGATIONS.some((w) => t.includes(w))) return "reject";
-  // Then check YES_WORDS (includes "没错" which contains "错")
-  if (YES_WORDS_SORTED.some((w) => t.includes(w))) return "confirm";
-  // Finally check remaining NO_WORDS
-  if (NO_WORDS_SIMPLE.some((w) => t.includes(w))) return "reject";
+  if (YES_WORDS.some((w) => t.includes(w))) return "confirm";
   return "unclear";
 }
 
@@ -38,5 +31,52 @@ export function formatReminderRow(reminder) {
     text: `${when} 提醒 ${who}:${reminder.message}`,
     statusLabel: label,
     statusClass: cls,
+  };
+}
+
+// Decides when the user has finished talking, from a stream of microphone
+// loudness samples (RMS, 0..1). Returns "listening", "done" or "no-speech".
+// The first calibrationMs of samples estimate background noise; the speech
+// threshold is capped so a user who starts talking immediately is still heard.
+export function createSpeechEndDetector({
+  silenceMs = 1500,
+  noSpeechTimeoutMs = 8000,
+  maxMs = 20000,
+  calibrationMs = 300,
+  minThreshold = 0.015,
+  maxThreshold = 0.06,
+  noiseFactor = 3,
+} = {}) {
+  let startedAt = null;
+  let noiseSum = 0;
+  let noiseCount = 0;
+  let threshold = null;
+  let heardSpeech = false;
+  let lastSpeechAt = 0;
+
+  return function update(level, now) {
+    if (startedAt === null) startedAt = now;
+    const elapsed = now - startedAt;
+
+    if (elapsed >= maxMs) return heardSpeech ? "done" : "no-speech";
+
+    if (elapsed < calibrationMs) {
+      noiseSum += level;
+      noiseCount += 1;
+      return "listening";
+    }
+    if (threshold === null) {
+      const noise = noiseCount ? noiseSum / noiseCount : 0;
+      threshold = Math.min(maxThreshold, Math.max(minThreshold, noise * noiseFactor));
+    }
+
+    if (level >= threshold) {
+      heardSpeech = true;
+      lastSpeechAt = now;
+      return "listening";
+    }
+    if (heardSpeech && now - lastSpeechAt >= silenceMs) return "done";
+    if (!heardSpeech && elapsed >= noSpeechTimeoutMs) return "no-speech";
+    return "listening";
   };
 }

@@ -90,6 +90,18 @@ button:active { background: var(--papaya-dark); }
   box-shadow: 0 2px 8px rgba(0,0,0,0.05);
 }
 
+#conversation-status {
+  min-height: 1.5em;
+  text-align: center;
+  margin: 0;
+}
+
+.app-version {
+  margin-top: 32px;
+  font-size: 0.75rem;
+  color: #b8a898;
+}
+
 .status-pending { color: #b8860b; }
 .status-sent { color: #2a8f4a; }
 .status-failed { color: #d33; }

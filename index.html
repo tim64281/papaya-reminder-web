@@ -6,7 +6,10 @@
   <title>Papaya 提醒</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" href="icon.png" />
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="apple-touch-icon" href="icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Papaya 提醒" />
+  <link rel="stylesheet" href="styles.css?v=20260929b" />
 </head>
 <body>
   <section id="login-screen">
@@ -32,6 +35,8 @@
     <ul id="contacts-list"></ul>
   </section>
 
-  <script type="module" src="app.js"></script>
+  <p id="app-version" class="app-version"></p>
+
+  <script type="module" src="app.js?v=20260929b"></script>
 </body>
 </html>
