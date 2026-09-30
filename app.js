@@ -1,8 +1,8 @@
 // web/app.js
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { createSpeechEndDetector, formatReminderRow, pickConfirmationOutcome } from "./logic.js?v=20260929d";
+import { createSpeechEndDetector, formatReminderRow, pickConfirmationOutcome } from "./logic.js?v=20260930a";
 
-const APP_VERSION = "20260929d";
+const APP_VERSION = "20260930a";
 const SUPABASE_URL = "https://lgercluzqbxlcjbdhkcw.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_YzWeHCfTap6N6LALQhddkA_HQV0QwSx";
 const FIXED_LOGIN_EMAIL = "papaya@papaya-reminder.local";
@@ -401,10 +401,16 @@ async function runConversation() {
     const decision = await askForConfirmation();
     if (!conversationActive) return;
     if (decision === "confirm") {
-      await saveReminder(parsed);
-      await refreshReminderList();
-      await speak("好的,已經幫您建立提醒了。");
-      endConversation("已建立提醒 ✅");
+      if (parsed.intent === "morning_image") {
+        await sendMorningImageNow();
+        await speak("好的,已經幫您發送早安圖了。");
+        endConversation("已發送早安圖 ✅");
+      } else {
+        await saveReminder(parsed);
+        await refreshReminderList();
+        await speak("好的,已經幫您建立提醒了。");
+        endConversation("已建立提醒 ✅");
+      }
       return;
     }
     if (decision === "reject") {
@@ -444,6 +450,10 @@ async function namedContacts() {
     .not("display_name", "is", null);
   if (error) throw new Error(`讀取聯絡人失敗:${error.message}`);
   return data;
+}
+
+async function sendMorningImageNow() {
+  await callFunction("morning-image", {});
 }
 
 async function saveReminder(parsed) {
