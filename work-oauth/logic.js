@@ -3,6 +3,7 @@ const CLIENT_ID = "5ea1bd3e-4eed-417e-ab9a-865ff1857486";
 const CALLBACK = "https://chatgpt.com/connector/oauth/eCrXCe2VBSeo";
 const PAGE_URL = "https://tim64281.github.io/papaya-reminder-web/work-oauth/";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const OPAQUE_AUTHORIZATION_ID = /^[a-z2-7]{32}$/;
 
 function reject(message = "授權資訊無法驗證，已停止操作。") {
   throw new Error(message);
@@ -11,8 +12,8 @@ function reject(message = "授權資訊無法驗證，已停止操作。") {
 export function parseAuthorizationId(search) {
   const values = new URLSearchParams(search).getAll("authorization_id");
   if (values.length === 0) return null;
-  if (values.length !== 1 || !UUID.test(values[0])) reject("授權編號無效，請從 ChatGPT 重新發起連線。");
-  return values[0].toLowerCase();
+  if (values.length !== 1 || (!UUID.test(values[0]) && !OPAQUE_AUTHORIZATION_ID.test(values[0]))) reject("授權編號無效，請從 ChatGPT 重新發起連線。");
+  return UUID.test(values[0]) ? values[0].toLowerCase() : values[0];
 }
 
 export function normalizeScopes(scope) {
