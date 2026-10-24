@@ -6,5 +6,5 @@ window.WORK_OAUTH_CONFIG = Object.freeze({
     "https://chatgpt.com/connector/oauth/eCrXCe2VBSeo"
   ],
   "pageUrl": "https://tim64281.github.io/papaya-reminder-web/work-oauth/",
-  "allowBootstrapSignup": true
+  "allowBootstrapSignup": false
 });
