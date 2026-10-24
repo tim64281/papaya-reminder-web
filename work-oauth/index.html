@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; connect-src https://soxixdwyqmhkqbpfqkug.supabase.co; base-uri 'none'; form-action 'none'">
+  <title>Papaya 測試連線</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./config.js" defer></script>
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <main id="page" class="card" aria-busy="true">
+    <header>
+      <span class="badge">隔離測試 · 僅假資料</span>
+      <h1>Papaya 測試連線</h1>
+      <p id="mode" class="subtitle">正在檢查網站設定…</p>
+    </header>
+
+    <aside class="notice">
+      <strong>這個連線可以做什麼？</strong>
+      <p>只可讀取一筆固定測試題目，以及提交你的草稿答案。它不會操作 LINE 或原本的提醒資料。</p>
+      <p class="question">測試問題：請用一句話說明高雄在哪裡。</p>
+      <p>完成登入仍需由管理者設定擁有者名單，才有權限存取假資料。</p>
+    </aside>
+
+    <p id="status" class="status" role="status" aria-live="polite">正在載入安全登入頁…</p>
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <form id="login-form">
+      <h2>由本人登入</h2>
+      <p class="hint">這是 Papaya 測試頁的登入帳號，與 Supabase 管理後台帳號分開。初次設定只會建立此測試頁的電子郵件／密碼登入身分。</p>
+      <p class="hint">請親自輸入測試帳號資訊。請勿把密碼貼到對話中。</p>
+      <label for="email">電子郵件</label>
+      <input id="email" name="email" type="email" autocomplete="username" inputmode="email" required maxlength="254" disabled>
+      <label for="password">密碼</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required minlength="8" disabled>
+      <div class="actions">
+        <button id="sign-in" type="submit" disabled>登入</button>
+        <button id="sign-up" class="secondary" type="button" disabled hidden>初次設定：建立測試帳號</button>
+      </div>
+    </form>
+
+    <p id="confirmation" class="notice" hidden>驗證信已提出寄送要求；這還不代表登入完成。請檢查收件匣與垃圾郵件，開啟信中連結，再回到本頁登入。若沒有收到信，請回到對話通知管理者，不需重複建立帳號。</p>
+
+    <section id="account" class="account" hidden aria-label="已驗證帳號">
+      <div><span class="hint">已驗證的電子郵件</span><p id="identity"></p></div>
+      <button id="logout" class="secondary compact" type="button" disabled>登出</button>
+    </section>
+
+    <section id="bootstrap-complete" class="notice success" hidden>
+      <h2>測試身分已登入</h2>
+      <p>請回到這段對話，通知管理者完成擁有者設定。這一頁目前沒有授權要求，也不會代替你同意任何連線。</p>
+    </section>
+
+    <section id="consent" hidden>
+      <h2>同意連線前請確認</h2>
+      <dl>
+        <dt>已核對允許名單的應用程式</dt>
+        <dd id="client-name"></dd>
+        <dt>應用程式識別碼</dt>
+        <dd id="client-id" class="identifier"></dd>
+      </dl>
+      <h3>要求的範圍</h3>
+      <ul id="scopes" class="scopes"></ul>
+      <p class="hint">同意後將返回 ChatGPT。假資料權限仍由伺服器的擁有者名單限制。</p>
+      <div class="actions consent-actions">
+        <button id="approve" type="button" disabled>同意並返回 ChatGPT</button>
+        <button id="deny" class="secondary" type="button" disabled>拒絕</button>
+      </div>
+    </section>
+
+    <footer>獨立測試環境 · Papaya Work Auth</footer>
+    <noscript><p class="error">請啟用 JavaScript，才能使用此登入頁。</p></noscript>
+  </main>
+</body>
+</html>
